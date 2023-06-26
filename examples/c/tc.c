@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
 /* Copyright (c) 2022 Hengqi Chen */
+#include <bpf/libbpf.h>
 #include <signal.h>
+#include <stdbool.h>
+#include <string.h>
+#include <assert.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include "tc.skel.h"
 
 #define LO_IFINDEX 1
+#define VETH1_IFINDEX 62
+#define VETH2_IFINDEX 64
 
 static volatile sig_atomic_t exiting = 0;
 
@@ -18,14 +25,107 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 	return vfprintf(stderr, format, args);
 }
 
+struct bpf_redirect_hook {
+	struct bpf_tc_hook hook;
+	struct bpf_tc_opts prog_opts;
+	int hook_created;
+	int prog_attached;
+};
+
+static struct bpf_redirect_hook *new_bpf_redirect_hook(int ifindex, int prog_fd)
+{
+	struct bpf_redirect_hook *this = malloc(sizeof(*this));
+
+	if (!this) {
+		return NULL;
+	}
+
+	memset(&this->hook, 0, sizeof(this->hook));
+	memset(&this->prog_opts, 0, sizeof(this->prog_opts));
+
+	this->hook_created = false;
+	this->prog_attached = false;
+
+	this->hook.ifindex = ifindex;
+	this->hook.attach_point = BPF_TC_INGRESS;
+	this->hook.sz = sizeof(this->hook);
+	
+	this->prog_opts.handle = 1;
+	this->prog_opts.priority = 1;
+	this->prog_opts.prog_fd = prog_fd;
+	this->prog_opts.sz = sizeof(this->prog_opts);
+	return this;
+}
+
+static int bpf_redirect_hook_attach(struct bpf_redirect_hook *this)
+{
+	int ret;
+
+	ret = bpf_tc_hook_create(&this->hook);
+	if (!ret) {
+		this->hook_created = true;
+	} else if (ret != -EEXIST) {
+		/* The hook (i.e. qdisc) may already exists because:
+		*   1. it is created by other processes or users
+		*   2. or since we are attaching to the TC ingress ONLY,
+		*      bpf_tc_hook_destroy does NOT really remove the qdisc,
+		*      there may be an egress filter on the qdisc
+		*/
+		fprintf(stderr, "Failed to create TC hook on if %d: ret=%d\n", this->hook.ifindex, ret);
+		return ret;
+	}
+
+	ret = bpf_tc_attach(&this->hook, &this->prog_opts);
+	if (ret) {
+		fprintf(stderr, "Failed to attach TC to if %d: ret=%d\n", this->hook.ifindex, ret);
+		return ret;
+	}
+	this->prog_attached = true;
+
+	return 0;
+}
+
+static int bpf_redirect_hook_destroy(struct bpf_redirect_hook *this)
+{
+	int ret;
+
+	if (this->prog_attached) {
+		this->prog_opts.prog_fd = 0;
+		this->prog_opts.prog_id = 0;
+		this->prog_opts.flags = 0;
+
+		ret = bpf_tc_detach(&this->hook, &this->prog_opts);
+		if (ret) {
+			fprintf(stderr, "Failed to detach prog on if %d: ret=%d\n", this->hook.ifindex, ret);
+		}
+	}
+
+	if (this->hook_created) {
+		ret = bpf_tc_hook_destroy(&this->hook);
+		if (ret) {
+			fprintf(stderr, "Failed to destroy TC hook on if %d: ret=%d\n", this->hook.ifindex, ret);
+		}
+	}
+
+	return ret;
+}
+
+static struct bpf_redirect_hook *hooks[2];
+#define HOOKS_NUM (sizeof(hooks)/sizeof(struct bpf_redirect_hook *))
+
+static void init_hooks(int prog_fd)
+{
+	hooks[0] = new_bpf_redirect_hook(VETH1_IFINDEX, prog_fd);
+	hooks[1] = new_bpf_redirect_hook(VETH2_IFINDEX, prog_fd);
+
+	assert(hooks[0]);
+	assert(hooks[1]);
+}
+
 int main(int argc, char **argv)
 {
-	DECLARE_LIBBPF_OPTS(bpf_tc_hook, tc_hook, .ifindex = LO_IFINDEX,
-			    .attach_point = BPF_TC_INGRESS);
-	DECLARE_LIBBPF_OPTS(bpf_tc_opts, tc_opts, .handle = 1, .priority = 1);
-	bool hook_created = false;
 	struct tc_bpf *skel;
-	int err;
+	int err, i;
 
 	libbpf_set_print(libbpf_print_fn);
 
@@ -35,25 +135,13 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* The hook (i.e. qdisc) may already exists because:
-	 *   1. it is created by other processes or users
-	 *   2. or since we are attaching to the TC ingress ONLY,
-	 *      bpf_tc_hook_destroy does NOT really remove the qdisc,
-	 *      there may be an egress filter on the qdisc
-	 */
-	err = bpf_tc_hook_create(&tc_hook);
-	if (!err)
-		hook_created = true;
-	if (err && err != -EEXIST) {
-		fprintf(stderr, "Failed to create TC hook: %d\n", err);
-		goto cleanup;
-	}
+	init_hooks(bpf_program__fd(skel->progs.redirect_ingress));
 
-	tc_opts.prog_fd = bpf_program__fd(skel->progs.tc_ingress);
-	err = bpf_tc_attach(&tc_hook, &tc_opts);
-	if (err) {
-		fprintf(stderr, "Failed to attach TC: %d\n", err);
-		goto cleanup;
+	for (i = 0; i < HOOKS_NUM; i++) {
+		err = bpf_redirect_hook_attach(hooks[i]);
+		if (err) {
+			goto cleanup;
+		}
 	}
 
 	if (signal(SIGINT, sig_int) == SIG_ERR) {
@@ -70,16 +158,10 @@ int main(int argc, char **argv)
 		sleep(1);
 	}
 
-	tc_opts.flags = tc_opts.prog_fd = tc_opts.prog_id = 0;
-	err = bpf_tc_detach(&tc_hook, &tc_opts);
-	if (err) {
-		fprintf(stderr, "Failed to detach TC: %d\n", err);
-		goto cleanup;
-	}
-
 cleanup:
-	if (hook_created)
-		bpf_tc_hook_destroy(&tc_hook);
+	for (i = 0; i < HOOKS_NUM; i++) {
+		bpf_redirect_hook_destroy(hooks[i]);
+	}
 	tc_bpf__destroy(skel);
 	return -err;
 }
