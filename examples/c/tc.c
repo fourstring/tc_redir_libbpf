@@ -7,11 +7,14 @@
 #include <assert.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 #include "tc.skel.h"
 
 #define LO_IFINDEX 1
-#define VETH1_IFINDEX 62
-#define VETH2_IFINDEX 64
+__u32 veth_ifindex[2];
+char veth_ip_char[2][15];
+in_addr_t veth_ip[2];
 
 static volatile sig_atomic_t exiting = 0;
 
@@ -115,8 +118,8 @@ static struct bpf_redirect_hook *hooks[2];
 
 static void init_hooks(int prog_fd)
 {
-	hooks[0] = new_bpf_redirect_hook(VETH1_IFINDEX, prog_fd);
-	hooks[1] = new_bpf_redirect_hook(VETH2_IFINDEX, prog_fd);
+	hooks[0] = new_bpf_redirect_hook(veth_ifindex[0], prog_fd);
+	hooks[1] = new_bpf_redirect_hook(veth_ifindex[1], prog_fd);
 
 	assert(hooks[0]);
 	assert(hooks[1]);
@@ -133,6 +136,21 @@ int main(int argc, char **argv)
 	if (!skel) {
 		fprintf(stderr, "Failed to open BPF skeleton\n");
 		return 1;
+	}
+
+
+	fprintf(stdout, "please input veth1_ip and veth1_ifindex.\n");
+	scanf("%s%u", &veth_ip_char[0][0], &veth_ifindex[0]);
+	fprintf(stdout, "please input veth2_ip and veth2_ifindex.\n");
+	scanf("%s%u", &veth_ip_char[1][0], &veth_ifindex[1]);
+	// printf("ip: %s, ifindex: %u\t", veth_ip_char[0], veth_ifindex[0]);
+	// printf("ip: %s, ifindex: %u\t", veth_ip_char[1], veth_ifindex[1]);
+	for (int i = 0; i < 2; ++i) {
+		veth_ip[i] = inet_addr(veth_ip_char[i]);
+		err = bpf_map__update_elem(skel->maps.tc_map, &veth_ip[i], sizeof(__u32), &veth_ifindex[i], sizeof(__u32), BPF_ANY);
+		if (err) {
+			goto cleanup;
+		}
 	}
 
 	init_hooks(bpf_program__fd(skel->progs.redirect_ingress));
