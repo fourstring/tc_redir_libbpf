@@ -10,8 +10,8 @@
 #include "tc.skel.h"
 
 #define LO_IFINDEX 1
-#define VETH1_IFINDEX 33
-#define VETH2_IFINDEX 35
+#define VETH1_IFINDEX 5
+#define VETH2_IFINDEX 7
 #define ETH_IFINDEX 2
 
 static volatile sig_atomic_t exiting = 0;
