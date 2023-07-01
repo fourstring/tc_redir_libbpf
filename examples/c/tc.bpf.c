@@ -62,7 +62,6 @@ static inline int redirect_netns(__u32 in_ifindex) {
 	int ret;
 	ret = bpf_redirect_peer(in_ifindex, 0);
 
-	bpf_printk("redirected to if %u's peer, ret=%d", in_ifindex, ret);
 	return ret;
 }
 
@@ -268,10 +267,6 @@ static inline int do_snat(struct __sk_buff *ctx) {
 			bpf_printk("bpf_l4_csum_replace failed: %d", ret);
 			return TC_ACT_OK;
 		}
-
-		__u16 csum;
-		bpf_skb_load_bytes(ctx, l4_csum_offset, &csum, sizeof(__sum16));
-		bpf_printk("new l4 csum 1: %x", csum);
 	}
 
 	// Replace the checksum of layer 3
@@ -290,10 +285,6 @@ static inline int do_snat(struct __sk_buff *ctx) {
 		bpf_printk("bpf_l4_csum_replace failed: %d", ret);
 		return TC_ACT_OK;
 	}
-
-	__u16 csum;
-	bpf_skb_load_bytes(ctx, l4_csum_offset, &csum, sizeof(__sum16));
-	bpf_printk("new l4 csum 2: %x", csum);
 
 	bpf_skb_store_bytes(ctx, l4_src_offset, &dynamic_query_id, sizeof(__u16), 0);
  
@@ -318,8 +309,6 @@ int redirect_ingress(struct __sk_buff *ctx)
 	if ((void *)(l3 + 1) > data_end)
 		return TC_ACT_OK;
 
-	bpf_printk("[ingress %d] received packet, ctx->protocol=%x", ctx->ifindex, bpf_ntohs(ctx->protocol));
-
 	// Currently we only care about ipv4 & TCP/UDP/ICMP
 	if (bpf_ntohs(ctx->protocol) != ETH_P_IP  || (l3->protocol != IPPROTO_TCP && l3->protocol != IPPROTO_ICMP && l3->protocol != IPPROTO_UDP)) 
 		return TC_ACT_OK;
@@ -337,8 +326,6 @@ int redirect_ingress(struct __sk_buff *ctx)
 
 	// After all these done, redirct the packet to eth's neighbor
 	ret = bpf_redirect_neigh(ETH_IFINDEX, NULL, 0, 0);
-
-	bpf_printk("redirected to if %u neigh, ret=%d", ETH_IFINDEX, ret);
 
 	return ret;
 }
@@ -373,7 +360,6 @@ int redirect_ingress_eth(struct __sk_buff *ctx)
 
 	ret = bpf_redirect_peer(in_ifindex, 0);
 
-	bpf_printk("redirected to if %u peer 3, ret=%d", in_ifindex, ret);
 	return ret;
 }
 
