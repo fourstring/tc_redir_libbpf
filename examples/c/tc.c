@@ -12,6 +12,7 @@
 #include "tc.skel.h"
 
 #define LO_IFINDEX 1
+#define ETH_IFINDEX 2
 __u32 veth_ifindex[2];
 char veth_ip_char[2][15];
 in_addr_t veth_ip[2];
@@ -113,7 +114,7 @@ static int bpf_redirect_hook_destroy(struct bpf_redirect_hook *this)
 	return ret;
 }
 
-static struct bpf_redirect_hook *hooks[2];
+static struct bpf_redirect_hook *hooks[3];
 #define HOOKS_NUM (sizeof(hooks)/sizeof(struct bpf_redirect_hook *))
 
 static void init_hooks(int prog_fd)
@@ -123,6 +124,13 @@ static void init_hooks(int prog_fd)
 
 	assert(hooks[0]);
 	assert(hooks[1]);
+}
+
+static void init_hooks_eth(int prog_fd)
+{
+	hooks[2] = new_bpf_redirect_hook(ETH_IFINDEX, prog_fd);
+
+	assert(hooks[2]);
 }
 
 int main(int argc, char **argv)
@@ -147,13 +155,14 @@ int main(int argc, char **argv)
 	// printf("ip: %s, ifindex: %u\t", veth_ip_char[1], veth_ifindex[1]);
 	for (int i = 0; i < 2; ++i) {
 		veth_ip[i] = inet_addr(veth_ip_char[i]);
-		err = bpf_map__update_elem(skel->maps.tc_map, &veth_ip[i], sizeof(__u32), &veth_ifindex[i], sizeof(__u32), BPF_ANY);
+		err = bpf_map__update_elem(skel->maps.netns_route_map, &veth_ip[i], sizeof(__u32), &veth_ifindex[i], sizeof(__u32), BPF_ANY);
 		if (err) {
 			goto cleanup;
 		}
 	}
 
 	init_hooks(bpf_program__fd(skel->progs.redirect_ingress));
+	init_hooks_eth(bpf_program__fd(skel->progs.redirect_ingress_eth));
 
 	for (i = 0; i < HOOKS_NUM; i++) {
 		err = bpf_redirect_hook_attach(hooks[i]);
